@@ -1,6 +1,5 @@
 # LRP Merge Method — Full Implementation Writeup
 > **Project:** Mergekit Custom Merge Method  
-> **Location:** `D:\Mergekit\mergekit\`  
 > **Date Completed:** 27 March 2026  
 
 ---
