@@ -104,6 +104,7 @@ class LRPComputer:
 
         # Free intermediate activations during backward — recompute instead of store
         self.model.gradient_checkpointing_enable()
+        orig_use_cache = getattr(self.model.config, "use_cache", True)
         self.model.config.use_cache = False  # required with checkpointing
 
         # Accumulator on CPU; only the active sample's grads live on GPU
@@ -142,6 +143,11 @@ class LRPComputer:
                     relevance_acc[n] += (p.grad.detach() * p.detach()).abs().float().cpu()
                     p.grad = None
             torch.cuda.empty_cache()
+
+        # Restore original settings
+        if hasattr(self.model, "gradient_checkpointing_disable"):
+            self.model.gradient_checkpointing_disable()
+        self.model.config.use_cache = orig_use_cache
 
         self.relevance_scores = {n: (r / n_samples) for n, r in relevance_acc.items()}
         return self.relevance_scores

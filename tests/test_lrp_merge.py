@@ -22,43 +22,48 @@ def model_b(tmp_path_factory):
 def test_lrp_merge_differs_from_magnitude(model_a, model_b):
     """
     Test that providing LRP scores produces a different mask 
-    than the default magnitude-based fallback.
+    than magnitude-based importance.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
-        lrp_path = os.path.join(tmpdir, "lrp_scores.pt")
+        lrp_path_inv = os.path.join(tmpdir, "lrp_scores_inv.pt")
+        lrp_path_mag = os.path.join(tmpdir, "lrp_scores_mag.pt")
         
         loader = LazyTensorLoader.from_disk(model_b)
         
-        lrp_scores = {}
+        lrp_scores_inv = {}
+        lrp_scores_mag = {}
         for name in loader.index.tensor_paths:
             tensor = loader.get_tensor(name)
-            # Use inverse of magnitude to ensure LRP mask differs from magnitude mask
-            lrp_scores[name] = 1.0 / (torch.abs(tensor) + 1e-6)
+            # Inverse of magnitude to ensure LRP mask differs from magnitude
+            lrp_scores_inv[name] = 1.0 / (torch.abs(tensor) + 1e-6)
+            # Direct magnitude
+            lrp_scores_mag[name] = torch.abs(tensor)
             
-        torch.save(lrp_scores, lrp_path)
+        torch.save(lrp_scores_inv, lrp_path_inv)
+        torch.save(lrp_scores_mag, lrp_path_mag)
         
-        # Run LRP merge
+        # Run LRP merge with inverse scores
         config_lrp = MergeConfiguration(
             merge_method="lrp",
             base_model=model_a,
             models=[
                 InputModelDefinition(
                     model=model_b,
-                    parameters={"weight": 1.0, "lrp_scores": lrp_path},
+                    parameters={"weight": 1.0, "lrp_scores": lrp_path_inv},
                 ),
             ],
             parameters={"density": 0.5},
             dtype="bfloat16",
         )
         
-        # Run magnitude merge (no lrp_scores passed)
+        # Run LRP merge with magnitude scores (simulating the old fallback)
         config_mag = MergeConfiguration(
             merge_method="lrp",
             base_model=model_a,
             models=[
                 InputModelDefinition(
                     model=model_b,
-                    parameters={"weight": 1.0},
+                    parameters={"weight": 1.0, "lrp_scores": lrp_path_mag},
                 ),
             ],
             parameters={"density": 0.5},

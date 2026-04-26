@@ -62,9 +62,7 @@ def compute_lrp_scores(args):
 
 def run_merge(args):
     print("\nStep 3: Running merge...\n")
-    mergekit_exec = "/usr/local/bin/mergekit-yaml"
-    if not os.path.exists(mergekit_exec):
-        mergekit_exec = shutil.which("mergekit-yaml")
+    mergekit_exec = shutil.which("mergekit-yaml")
     if not mergekit_exec:
         raise RuntimeError("✗ mergekit-yaml not found. Install mergekit.")
 
