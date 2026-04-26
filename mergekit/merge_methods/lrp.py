@@ -16,7 +16,21 @@ from mergekit.merge_methods.base import (
 )
 import functools
 from mergekit.merge_methods.rectify_embed import rectify_embed_sizes
-from mergekit.sparsify import build_mask
+
+def build_mask(importance: torch.Tensor, density: float) -> torch.Tensor:
+    """Creates a binary mask keeping the top proportion (density) of elements."""
+    if density >= 1.0:
+        return torch.ones_like(importance)
+    k = int(density * importance.numel())
+    if k <= 0:
+        return torch.zeros_like(importance)
+    w = importance.view(-1)
+    if w.device.type == "cpu":
+        w = w.float()
+    topk = torch.argsort(w, descending=True)[:k]
+    mask = torch.zeros_like(importance)
+    mask.view(-1)[topk] = 1
+    return mask
 
 @functools.lru_cache(maxsize=4)
 def _load_lrp_scores(lrp_path: str):
@@ -154,7 +168,7 @@ class LRPMerge(MergeMethod):
     Merges fine-tuned models by:
     1. Computing task vectors (deltas from base)
     2. Using LRP importance scores to determine which weights are most relevant
-    3. Sparsifying based on importance (LRP scores or magnitude fallback)
+    3. Sparsifying based on importance (strictly requires LRP scores)
     4. Weighted averaging of sparse deltas
     """
 

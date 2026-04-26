@@ -148,10 +148,7 @@ class LRPComputer:
                 ids = inputs["input_ids"][i:i+1]
                 attention_mask = inputs["attention_mask"][i:i+1]
                 
-                embed = self.model.get_input_embeddings()(ids)
-                embed.requires_grad_(True)
-
-                logits = self.model(inputs_embeds=embed, attention_mask=attention_mask).logits            # full graph, checkpointed
+                logits = self.model(input_ids=ids, attention_mask=attention_mask).logits            # full graph, checkpointed
                 
                 # Find the actual last token position before padding
                 last_token_idx = attention_mask.sum().item() - 1

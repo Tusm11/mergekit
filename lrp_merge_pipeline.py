@@ -16,6 +16,9 @@ def validate(args):
 def generate_yaml(args):
     print("Step 2: Generating YAML...")
     
+    m1_score_path = os.path.join(args.output, "lrp_scores", "model1", "lrp_scores.safetensors") if args.compute_lrp else f"{args.model1}/lrp_scores.safetensors"
+    m2_score_path = os.path.join(args.output, "lrp_scores", "model2", "lrp_scores.safetensors") if args.compute_lrp else f"{args.model2}/lrp_scores.safetensors"
+    
     yaml = f"""
 merge_method: lrp
 
@@ -29,12 +32,12 @@ models:
   - model: \"{args.model1}\"
     parameters:
       weight: 1.0
-      lrp_scores: \"{args.model1}/lrp_scores.safetensors\"
+      lrp_scores: \"{m1_score_path}\"
 
   - model: \"{args.model2}\"
     parameters:
       weight: 1.0
-      lrp_scores: \"{args.model2}/lrp_scores.safetensors\"
+      lrp_scores: \"{m2_score_path}\"
 """
     with open("lrp_config.yaml", "w") as f:
         f.write(yaml.strip())
@@ -48,15 +51,20 @@ def compute_lrp_scores(args):
         print("Skipping LRP computation. Make sure you already have lrp_scores.safetensors in your model directories.")
         return
         
+    m1_out = os.path.join(args.output, "lrp_scores", "model1")
+    m2_out = os.path.join(args.output, "lrp_scores", "model2")
+    os.makedirs(m1_out, exist_ok=True)
+    os.makedirs(m2_out, exist_ok=True)
+        
     print("Computing LRP scores for Model 1...")
     subprocess.run([
-        "python", "lrp_computer.py", args.model1, args.model1,
+        "python", "lrp_computer.py", args.model1, m1_out,
         "--prompts", "The capital of France is"
     ], check=True)
     
     print("Computing LRP scores for Model 2...")
     subprocess.run([
-        "python", "lrp_computer.py", args.model2, args.model2,
+        "python", "lrp_computer.py", args.model2, m2_out,
         "--prompts", "The capital of France is"
     ], check=True)
 
