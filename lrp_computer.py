@@ -49,17 +49,13 @@ class LRPComputer:
         print(f"Loading model from {self.config.model_path}...")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path)
 
-        # Determine dtype based on device
-        has_cuda = torch.cuda.is_available() and self.config.device == "cuda"
-        if has_cuda:
-            torch_dtype = torch.float16
-            device_map = self.config.device
-        else:
-            torch_dtype = torch.float32
-            device_map = None  # device_map not recommended for CPU
+        # For LRP, we need float32 for accurate gradient computation
+        # Float16 gradients underflow and produce zeros for small-magnitude parameters
+        torch_dtype = torch.float32
+        device_map = self.config.device if self.config.device == "cuda" else None
 
         print(f"  Using device: {self.config.device}")
-        print(f"  Using dtype: {torch_dtype}")
+        print(f"  Using dtype: {torch_dtype} (required for accurate LRP gradient computation)")
 
         try:
             self.model = AutoModelForCausalLM.from_pretrained(

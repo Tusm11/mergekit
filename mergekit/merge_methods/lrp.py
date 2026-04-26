@@ -34,12 +34,16 @@ def build_mask(importance: torch.Tensor, density: float) -> torch.Tensor:
 
 @functools.lru_cache(maxsize=4)
 def _load_lrp_scores(lrp_path: str):
+    """Load LRP scores from disk. Returns a deep copy to prevent cache mutation."""
     if lrp_path.endswith(".safetensors"):
         from safetensors.torch import load_file
-        return load_file(lrp_path, device="cpu")
+        scores = load_file(lrp_path, device="cpu")
     else:
         import torch
-        return torch.load(lrp_path, map_location="cpu")
+        scores = torch.load(lrp_path, map_location="cpu")
+    
+    # Return a deep copy to prevent mutations of cached tensors
+    return {k: v.clone() for k, v in scores.items()}
 
 class LRPMergeTask(Task[torch.Tensor]):
     """
@@ -143,10 +147,9 @@ class LRPMergeTask(Task[torch.Tensor]):
             mask = build_mask(importance, self.density)
             sparse_delta = delta * mask
 
-            # Weighted averaging
+            # Apply per-model weight (no normalization; each model contributes its full weight)
             weight = self.model_weights[ref] if ref in self.model_weights else 1.0
-            normalized_weight = weight / total_weight
-            merged_deltas += normalized_weight * sparse_delta
+            merged_deltas += weight * sparse_delta
 
         # Final merged tensor
         return base_tensor + merged_deltas
