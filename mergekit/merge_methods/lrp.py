@@ -105,10 +105,6 @@ class LRPMergeTask(Task[torch.Tensor]):
         if not self.model_weights:
             raise ValueError("model_weights cannot be empty")
 
-        total_weight = sum(self.model_weights.values())
-        if total_weight == 0:
-            raise ValueError("Sum of model weights cannot be zero")
-
         # Process each model
         for ref, fine_tuned_weight in weight_tensors.items():
             # Validate tensor shape
