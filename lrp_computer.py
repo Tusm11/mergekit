@@ -23,6 +23,7 @@ class LRPConfig:
     sample_prompts: List[str]
     max_length: int = 512
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    load_in_4bit: bool = False
 
 
 class LRPComputer:
@@ -52,11 +53,22 @@ class LRPComputer:
 
         print(f"  Using device: {self.config.device}")
         print(f"  Using dtype: {torch_dtype}")
+        
+        quant_config = None
+        if self.config.load_in_4bit:
+            from transformers import BitsAndBytesConfig
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch_dtype,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
 
         try:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_path,
                 torch_dtype=torch_dtype,
+                quantization_config=quant_config,
                 device_map=device_map,
                 low_cpu_mem_usage=True,
             )
@@ -66,6 +78,7 @@ class LRPComputer:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_path,
                 torch_dtype=torch_dtype,
+                quantization_config=quant_config,
                 device_map=device_map,
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
@@ -84,8 +97,6 @@ class LRPComputer:
         if self.model is None:
             self.load_model()
 
-        print("Computing LRP scores using AttnLRP (via lxt)...")
-        
         try:
             model_type = getattr(self.model.config, "model_type", "").lower()
             if "llama" in model_type:
@@ -98,56 +109,71 @@ class LRPComputer:
                 from lxt.models.mistral import attnlrp
                 attnlrp.register(self.model)
             else:
-                print(f"Warning: Architecture '{model_type}' not natively supported by lxt's AttnLRP. Relevance may be plain gradient×weight.")
+                raise ValueError(
+                    f"AttnLRP not supported for model_type={model_type!r}. "
+                    f"Currently supported: llama, qwen, mistral. "
+                    f"For other architectures, contribute an lxt rules module."
+                )
         except ImportError:
-            print("Warning: lxt not found or import failed. AttnLRP rules will not be applied.")
+            raise ImportError("lxt is required for AttnLRP. Install with: pip install lxt") from None
 
         # Free intermediate activations during backward — recompute instead of store
         self.model.gradient_checkpointing_enable()
         orig_use_cache = getattr(self.model.config, "use_cache", True)
         self.model.config.use_cache = False  # required with checkpointing
 
-        # Accumulator on CPU; only the active sample's grads live on GPU
-        relevance_acc = {
-            n: torch.zeros_like(p, device="cpu", dtype=torch.float32)
-            for n, p in self.model.named_parameters() if p.requires_grad
-        }
+        try:
+            # Accumulator on CPU; only the active sample's grads live on GPU
+            relevance_acc = {
+                n: torch.zeros_like(p, device="cpu", dtype=torch.float32)
+                for n, p in self.model.named_parameters() if p.requires_grad
+            }
 
-        # Tokenize sample prompts
-        if self.config.sample_prompts:
-            inputs = self.tokenizer(
-                self.config.sample_prompts, return_tensors="pt",
-                padding=True, truncation=True, max_length=self.config.max_length,
-            ).to(self.config.device)
-        else:
-            raise ValueError("No sample prompts provided for LRP computation")
+            # Tokenize sample prompts
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                
+            if self.config.sample_prompts:
+                inputs = self.tokenizer(
+                    self.config.sample_prompts, return_tensors="pt",
+                    padding=True, truncation=True, max_length=self.config.max_length,
+                ).to(self.config.device)
+            else:
+                raise ValueError("No sample prompts provided for LRP computation")
 
-        n_samples = inputs["input_ids"].shape[0]
+            n_samples = inputs["input_ids"].shape[0]
 
-        for i in range(n_samples):                  # one sample at a time
-            print(f"Processing sample {i+1}/{n_samples}...")
-            ids = inputs["input_ids"][i:i+1]
-            embed = self.model.get_input_embeddings()(ids)
-            embed.requires_grad_(True)
+            for i in range(n_samples):                  # one sample at a time
+                print(f"Processing sample {i+1}/{n_samples}...")
+                ids = inputs["input_ids"][i:i+1]
+                attention_mask = inputs["attention_mask"][i:i+1]
+                
+                embed = self.model.get_input_embeddings()(ids)
+                embed.requires_grad_(True)
 
-            logits = self.model(inputs_embeds=embed).logits            # full graph, checkpointed
-            target = logits[:, -1, :].max(dim=-1).values.sum()         # seed: predicted-token logit
+                logits = self.model(inputs_embeds=embed, attention_mask=attention_mask).logits            # full graph, checkpointed
+                
+                # Find the actual last token position before padding
+                last_token_idx = attention_mask.sum().item() - 1
+                target = logits[:, last_token_idx, :].max(dim=-1).values.sum()         # seed: predicted-token logit
 
-            self.model.zero_grad(set_to_none=True)
-            target.backward()                                          # ONE real backward pass
+                self.model.zero_grad(set_to_none=True)
+                target.backward()                                          # ONE real backward pass
 
-            with torch.no_grad():                                      # accumulate R_w = grad ⊙ w
-                for n, p in self.model.named_parameters():
-                    if p.grad is None:
-                        continue
-                    relevance_acc[n] += (p.grad.detach() * p.detach()).abs().float().cpu()
-                    p.grad = None
-            torch.cuda.empty_cache()
-
-        # Restore original settings
-        if hasattr(self.model, "gradient_checkpointing_disable"):
-            self.model.gradient_checkpointing_disable()
-        self.model.config.use_cache = orig_use_cache
+                with torch.no_grad():                                      # accumulate R_w = grad ⊙ w
+                    for n, p in self.model.named_parameters():
+                        if p.grad is None:
+                            continue
+                        relevance_acc[n] += (p.grad.detach() * p.detach()).abs().float().cpu()
+                
+                self.model.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
+                
+        finally:
+            # Restore original settings
+            if hasattr(self.model, "gradient_checkpointing_disable"):
+                self.model.gradient_checkpointing_disable()
+            self.model.config.use_cache = orig_use_cache
 
         self.relevance_scores = {n: (r / n_samples) for n, r in relevance_acc.items()}
         return self.relevance_scores
@@ -230,6 +256,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompts", nargs="+", help="Sample prompts for LRP computation"
     )
+    parser.add_argument(
+        "--load-in-4bit", action="store_true", help="Load the model in 4-bit (NF4) for lower memory usage"
+    )
 
     args = parser.parse_args()
 
@@ -238,4 +267,5 @@ if __name__ == "__main__":
         output_path=args.output_path,
         sample_prompts=args.prompts,
         device=args.device,
+        load_in_4bit=args.load_in_4bit,
     )
