@@ -164,7 +164,10 @@ class LRPMerge(MergeMethod):
         ]
 
     def tensor_parameters(self) -> List[ConfigParameterDef]:
-        return [ConfigParameterDef(name="weight", required=False, default_value=1.0)]
+        return [
+            ConfigParameterDef(name="weight", required=False, default_value=1.0),
+            ConfigParameterDef(name="lrp_scores", required=False),
+        ]
 
     @override
     def make_task(
@@ -175,12 +178,12 @@ class LRPMerge(MergeMethod):
         parameters: ImmutableMap[str, Any],
         tensor_parameters: ImmutableMap[ModelReference, ImmutableMap[str, Any]],
         base_model: Optional[ModelReference],
-        lrp_scores: Optional[Dict[str, str]] = None,
         **_kwargs,
     ) -> Task:
         """Create the LRP merge task with proper validation."""
         # Collect model weights from non-base models
         model_weights = {}
+        lrp_scores_map = {}
         for model_ref, params in tensor_parameters.items():
             if model_ref != base_model:
                 try:
@@ -188,6 +191,9 @@ class LRPMerge(MergeMethod):
                 except (KeyError, TypeError):
                     weight = 1.0
                 model_weights[model_ref] = weight
+
+                if "lrp_scores" in params and params["lrp_scores"] is not None:
+                    lrp_scores_map[str(model_ref)] = str(params["lrp_scores"])
 
         if not model_weights:
             raise ValueError(
@@ -210,5 +216,5 @@ class LRPMerge(MergeMethod):
             model_weights=ImmutableMap(model_weights),
             density=density,
             weight_info=output_weight,
-            lrp_scores=ImmutableMap(lrp_scores) if lrp_scores else None,
+            lrp_scores=ImmutableMap(lrp_scores_map) if lrp_scores_map else None,
         )

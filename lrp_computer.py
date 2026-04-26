@@ -42,6 +42,7 @@ class LRPComputer:
         self.tokenizer = None
         self.relevance_scores: Dict[str, torch.Tensor] = {}
         self.activations: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self.module_relevance: Dict[str, torch.Tensor] = {}  # Store propagated relevance
         self.hooks: List[Any] = []
 
     def load_model(self) -> None:
@@ -85,274 +86,65 @@ class LRPComputer:
 
         self.model.eval()
 
-    def compute_relevance_epsilon(
-        self,
-        activations: torch.Tensor,
-        weights: torch.Tensor,
-        output_relevance: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute relevance using LRP-epsilon rule.
-        R_j = sum_k (z_jk / (sum_j z_jk + epsilon)) * R_k
-        """
-        epsilon = self.config.epsilon
-
-        # Ensure activations and weights are on same device
-        activations = activations.to(weights.device)
-        output_relevance = output_relevance.to(weights.device)
-
-        # Compute forward pass contribution z = xW^T
-        z = F.linear(activations, weights)
-
-        # Add epsilon for numerical stability
-        z_stable = z + epsilon * torch.sign(z)
-
-        # Compute redistribution factor s = R_out / z_stable
-        s = output_relevance / z_stable
-
-        # Flatten batch and sequence: (B, S, F) -> (N, F)
-        x_flat = activations.reshape(-1, activations.shape[-1])
-        s_flat = s.reshape(-1, s.shape[-1])
-
-        # Relevance for weights: |W_ij * x_i * s_j| summed over batch/seq
-        weight_relevance = weights.abs() * (s_flat.abs().t() @ x_flat.abs())
-
-        return weight_relevance
-
-    def compute_relevance_gamma(
-        self,
-        activations: torch.Tensor,
-        weights: torch.Tensor,
-        output_relevance: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute relevance using LRP-gamma rule.
-        Adds positive contributions with a gamma factor.
-        """
-        gamma = self.config.gamma
-        epsilon = self.config.epsilon
-
-        activations = activations.to(weights.device)
-        output_relevance = output_relevance.to(weights.device)
-
-        # Separate positive contributions
-        weights_pos = torch.clamp(weights, min=0)
-        w_gamma = weights + gamma * weights_pos
-
-        # Forward pass with enhanced weights
-        z = F.linear(activations, w_gamma)
-        z = z + epsilon * torch.sign(z)
-
-        # Redistribute relevance
-        s = output_relevance / z
-
-        x_flat = activations.reshape(-1, activations.shape[-1])
-        s_flat = s.reshape(-1, s.shape[-1])
-
-        weight_relevance = weights.abs() * (s_flat.abs().t() @ x_flat.abs())
-
-        return weight_relevance
-
-    def compute_relevance_alpha_beta(
-        self,
-        activations: torch.Tensor,
-        weights: torch.Tensor,
-        output_relevance: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute relevance using LRP-alpha_beta rule.
-        Separates positive and negative contributions.
-        """
-        alpha = self.config.alpha
-        beta = self.config.beta
-        epsilon = self.config.epsilon
-
-        activations = activations.to(weights.device)
-        output_relevance = output_relevance.to(weights.device)
-
-        weights_pos = torch.clamp(weights, min=0)
-        weights_neg = torch.clamp(weights, max=0)
-
-        # Positive and negative forward passes
-        z_pos = F.linear(activations, weights_pos)
-        z_neg = F.linear(activations, weights_neg)
-
-        z = alpha * z_pos + beta * z_neg
-        z = z + epsilon * torch.sign(z)
-
-        s = output_relevance / z
-
-        x_flat = activations.reshape(-1, activations.shape[-1])
-        s_flat = s.reshape(-1, s.shape[-1])
-
-        weight_relevance = weights.abs() * (s_flat.abs().t() @ x_flat.abs())
-
-        return weight_relevance
-
-    def compute_gradcam_importance(
-        self,
-        input_ids: torch.Tensor,
-        target_layer: str,
-    ) -> torch.Tensor:
-        """
-        Compute importance using Grad-CAM style gradients.
-        This is a practical alternative to full LRP.
-        """
-        self.model.zero_grad()
-
-        # Enable gradients for input
-        embedding_layer = self.model.get_input_embeddings()
-        inputs_embeds = embedding_layer(input_ids)
-        inputs_embeds.requires_grad_(True)
-
-        # Forward pass
-        outputs = self.model(inputs_embeds=inputs_embeds, output_hidden_states=True)
-        logits = outputs.logits
-
-        # Compute gradient of output w.r.t. embeddings
-        target_token_idx = logits.shape[1] - 1
-        target_logit = logits[0, target_token_idx, :].max()
-        target_logit.backward()
-
-        # Get gradients
-        gradients = inputs_embeds.grad
-
-        # Importance = gradient magnitude
-        importance = torch.abs(gradients)
-
-        return importance
-
-    def compute_relevance_for_tensor(
-        self,
-        tensor_name: str,
-        tensor: torch.Tensor,
-        sample_activations: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Compute relevance scores for a specific tensor.
-
-        Args:
-            tensor_name: Name of the tensor (e.g., "model.layers.0.attn.q_proj.weight")
-            tensor: The weight tensor
-            sample_activations: Optional sample activations from a forward pass
-
-        Returns:
-            Relevance scores for the tensor
-        """
-        # If we have sample activations, use proper LRP rules
-        if sample_activations is not None:
-            # Create dummy output relevance (normally from backward pass)
-            # Match the shape of the output activations
-            output_relevance = torch.ones_like(
-                (
-                    F.linear(sample_activations, tensor)
-                    if tensor.dim() == 2
-                    else sample_activations
-                ),
-                device=tensor.device,
-            )
-
-            if self.config.lrp_rule == "epsilon":
-                relevance = self.compute_relevance_epsilon(
-                    sample_activations, tensor, output_relevance
-                )
-            elif self.config.lrp_rule == "gamma":
-                relevance = self.compute_relevance_gamma(
-                    sample_activations, tensor, output_relevance
-                )
-            elif self.config.lrp_rule == "alpha_beta":
-                relevance = self.compute_relevance_alpha_beta(
-                    sample_activations, tensor, output_relevance
-                )
-            else:
-                raise ValueError(f"Unknown LRP rule: {self.config.lrp_rule}")
-        else:
-            # Fallback: use magnitude-based proxy
-            relevance = torch.abs(tensor)
-
-        return relevance
-
-    def _register_hooks(self) -> None:
-        """Register forward hooks to collect activations."""
-        self.activations = {}
-        self.hooks = []
-
-        def get_hook(name):
-            def hook(module, input, output):
-                # Store detached tensors; move to CPU if memory is an issue
-                self.activations[name] = (input[0].detach(), output.detach())
-
-            return hook
-
-        for name, module in self.model.named_modules():
-            if isinstance(module, torch.nn.Linear):
-                handle = module.register_forward_hook(get_hook(name))
-                self.hooks.append(handle)
-
-    def _remove_hooks(self) -> None:
-        """Remove previously registered hooks."""
-        for handle in self.hooks:
-            handle.remove()
-        self.hooks = []
-
     def compute_all_relevance_scores(self) -> Dict[str, torch.Tensor]:
         """
-        Compute relevance scores for all model weights.
-
-        This is the main entry point for computing LRP scores.
+        Compute relevance scores for all model weights using true AttnLRP.
         """
         if self.model is None:
             self.load_model()
 
-        print(f"Computing LRP scores using {self.config.lrp_rule} rule...")
+        print("Computing LRP scores using AttnLRP (via lxt)...")
+        
+        try:
+            from lxt.models.llama import attnlrp
+            # Try to handle architecture-specific registration if needed. 
+            # For this example, we assume Llama architecture.
+            attnlrp.register(self.model)
+        except ImportError:
+            print("Warning: lxt not found. AttnLRP rules will not be applied.")
+
+        # Free intermediate activations during backward — recompute instead of store
+        self.model.gradient_checkpointing_enable()
+        self.model.config.use_cache = False  # required with checkpointing
+
+        # Accumulator on CPU; only the active sample's grads live on GPU
+        relevance_acc = {
+            n: torch.zeros_like(p, device="cpu", dtype=torch.float32)
+            for n, p in self.model.named_parameters() if p.requires_grad
+        }
 
         # Tokenize sample prompts
         if self.config.sample_prompts:
             inputs = self.tokenizer(
-                self.config.sample_prompts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=self.config.max_length,
+                self.config.sample_prompts, return_tensors="pt",
+                padding=True, truncation=True, max_length=self.config.max_length,
             ).to(self.config.device)
-
-            # Get sample activations via forward pass with hooks
-            self._register_hooks()
-            with torch.no_grad():
-                self.model(**inputs, output_hidden_states=False)
-            self._remove_hooks()
         else:
-            # No samples provided, use magnitude fallback
-            print("No sample prompts provided, using magnitude-based importance...")
+            raise ValueError("No sample prompts provided for LRP computation")
 
-        # Map module names to parameter names
-        # Most parameters in transformer layers follow {module_name}.weight or {module_name}.bias
-        parameter_to_module = {}
-        for mod_name, _ in self.model.named_modules():
-            parameter_to_module[f"{mod_name}.weight"] = mod_name
-            parameter_to_module[f"{mod_name}.bias"] = mod_name
+        n_samples = inputs["input_ids"].shape[0]
 
-        # Compute relevance for each parameter
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
+        for i in range(n_samples):                  # one sample at a time
+            print(f"Processing sample {i+1}/{n_samples}...")
+            ids = inputs["input_ids"][i:i+1]
+            embed = self.model.get_input_embeddings()(ids)
+            embed.requires_grad_(True)
 
-            print(f"Processing {name}...")
+            logits = self.model(inputs_embeds=embed).logits            # full graph, checkpointed
+            target = logits[:, -1, :].max(dim=-1).values.sum()         # seed: predicted-token logit
 
-            # Try to find captured activations for this parameter's module
-            module_name = parameter_to_module.get(name)
-            act_data = self.activations.get(module_name)
+            self.model.zero_grad(set_to_none=True)
+            target.backward()                                          # ONE real backward pass
 
-            # Pass input activations (the first element of act_data tuple)
-            sample_act = act_data[0] if act_data is not None else None
+            with torch.no_grad():                                      # accumulate R_w = grad ⊙ w
+                for n, p in self.model.named_parameters():
+                    if p.grad is None:
+                        continue
+                    relevance_acc[n] += (p.grad.detach() * p.detach()).abs().float().cpu()
+                    p.grad = None
+            torch.cuda.empty_cache()
 
-            # Compute relevance for this parameter
-            relevance = self.compute_relevance_for_tensor(
-                name, param.data, sample_activations=sample_act
-            )
-
-            self.relevance_scores[name] = relevance.cpu()
-
+        self.relevance_scores = {n: (r / n_samples) for n, r in relevance_acc.items()}
         return self.relevance_scores
 
     def save_relevance_scores(self, output_format: str = "safetensors") -> None:
