@@ -21,19 +21,13 @@ class LRPConfig:
     model_path: str
     output_path: str
     sample_prompts: List[str]
-    batch_size: int = 1
     max_length: int = 512
-    lrp_rule: str = "epsilon"  # "epsilon", "gamma", or "alpha_beta"
-    epsilon: float = 1e-9
-    gamma: float = 0.25
-    alpha: float = 1.0
-    beta: float = 0.0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class LRPComputer:
     """
-    Computes Layer-wise Relevance Propagation scores for transformer models.
+    Computes Layer-wise Relevance Propagation scores for transformer models using AttnLRP.
     """
 
     def __init__(self, config: LRPConfig):
@@ -41,9 +35,6 @@ class LRPComputer:
         self.model = None
         self.tokenizer = None
         self.relevance_scores: Dict[str, torch.Tensor] = {}
-        self.activations: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
-        self.module_relevance: Dict[str, torch.Tensor] = {}  # Store propagated relevance
-        self.hooks: List[Any] = []
 
     def load_model(self) -> None:
         """Load the model and tokenizer."""
@@ -174,9 +165,6 @@ class LRPComputer:
         # Save metadata
         metadata = {
             "model_path": self.config.model_path,
-            "lrp_rule": self.config.lrp_rule,
-            "epsilon": self.config.epsilon,
-            "gamma": self.config.gamma,
             "num_tensors": len(self.relevance_scores),
         }
 
@@ -231,9 +219,6 @@ if __name__ == "__main__":
     parser.add_argument("model_path", help="Path to the HuggingFace model")
     parser.add_argument("output_path", help="Where to save LRP scores")
     parser.add_argument(
-        "--rule", default="epsilon", choices=["epsilon", "gamma", "alpha_beta"]
-    )
-    parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
     parser.add_argument(
@@ -246,6 +231,5 @@ if __name__ == "__main__":
         model_path=args.model_path,
         output_path=args.output_path,
         sample_prompts=args.prompts,
-        lrp_rule=args.rule,
         device=args.device,
     )

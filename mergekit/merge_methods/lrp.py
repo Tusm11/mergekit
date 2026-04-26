@@ -14,10 +14,18 @@ from mergekit.merge_methods.base import (
     MergeMethod,
     MergeTensorInput,
 )
+import functools
 from mergekit.merge_methods.rectify_embed import rectify_embed_sizes
 from mergekit.sparsify import build_mask
 
-_GLOBAL_LRP_CACHE: Dict[str, Any] = {}
+@functools.lru_cache(maxsize=4)
+def _load_lrp_scores(lrp_path: str):
+    if lrp_path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+        return load_file(lrp_path, device="cpu")
+    else:
+        import torch
+        return torch.load(lrp_path, map_location="cpu")
 
 class LRPMergeTask(Task[torch.Tensor]):
     """
@@ -84,7 +92,6 @@ class LRPMergeTask(Task[torch.Tensor]):
             raise ValueError("Sum of model weights cannot be zero")
 
         # Process each model
-        global _GLOBAL_LRP_CACHE
         for ref, fine_tuned_weight in weight_tensors.items():
             # Validate tensor shape
             if fine_tuned_weight.shape != base_tensor.shape:
@@ -100,21 +107,16 @@ class LRPMergeTask(Task[torch.Tensor]):
             ref_str = str(ref)
             if self.lrp_scores is not None and ref_str in self.lrp_scores:
                 lrp_path = self.lrp_scores[ref_str]
-                if lrp_path not in _GLOBAL_LRP_CACHE:
-                    if lrp_path.endswith(".safetensors"):
-                        from safetensors.torch import load_file
-                        _GLOBAL_LRP_CACHE[lrp_path] = load_file(lrp_path, device="cpu")
-                    else:
-                        _GLOBAL_LRP_CACHE[lrp_path] = torch.load(lrp_path, map_location="cpu")
-                importance = _GLOBAL_LRP_CACHE[lrp_path].get(self.weight_info.name)
+                scores_dict = _load_lrp_scores(lrp_path)
+                importance = scores_dict.get(self.weight_info.name)
                 if importance is not None:
                     importance = importance.to(delta.device)
 
-            # Fallback to magnitude-based importance
+            # Strict LRP: No silent fallback to magnitude
             if importance is None:
-                import logging
-                logging.warning(f"LRP scores for {self.weight_info.name} not found or not provided for {ref_str}. Falling back to magnitude.")
-                importance = delta.abs()
+                raise RuntimeError(
+                    f"LRP scores for tensor '{self.weight_info.name}' not found or not provided for {ref_str}."
+                )
 
             # Validate importance shape
             if importance.shape != delta.shape:
