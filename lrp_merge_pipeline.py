@@ -99,8 +99,10 @@ def main():
     parser.add_argument("--model2", default="./models/tinyllama-local-full", help="Second model path")
     parser.add_argument("--output", default="./models/merged-model", help="Output directory")
     parser.add_argument("--compute-lrp", action="store_true", help="Compute LRP scores before merging")
-    parser.add_argument("--cuda", action="store_true", default=True, help="Use CUDA for merging")
+    parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda", help="Device to use for merging")
     args = parser.parse_args()
+
+    args.cuda = args.device == "cuda"
 
     print("=== LRP MERGE PIPELINE START ===\n")
     validate(args)

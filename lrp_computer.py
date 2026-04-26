@@ -23,7 +23,6 @@ class LRPConfig:
     sample_prompts: List[str]
     max_length: int = 512
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    load_in_4bit: bool = False
 
 
 class LRPComputer:
@@ -53,22 +52,11 @@ class LRPComputer:
 
         print(f"  Using device: {self.config.device}")
         print(f"  Using dtype: {torch_dtype}")
-        
-        quant_config = None
-        if self.config.load_in_4bit:
-            from transformers import BitsAndBytesConfig
-            quant_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch_dtype,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
-            )
 
         try:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_path,
                 torch_dtype=torch_dtype,
-                quantization_config=quant_config,
                 device_map=device_map,
                 low_cpu_mem_usage=True,
             )
@@ -78,7 +66,6 @@ class LRPComputer:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_path,
                 torch_dtype=torch_dtype,
-                quantization_config=quant_config,
                 device_map=device_map,
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
@@ -150,8 +137,8 @@ class LRPComputer:
                 
                 logits = self.model(input_ids=ids, attention_mask=attention_mask).logits            # full graph, checkpointed
                 
-                # Find the actual last token position before padding
-                last_token_idx = attention_mask.sum().item() - 1
+                # Find the actual last token position before padding (handles both left and right padding)
+                last_token_idx = attention_mask[0].nonzero(as_tuple=True)[0][-1].item()
                 target = logits[:, last_token_idx, :].max(dim=-1).values.sum()         # seed: predicted-token logit
 
                 self.model.zero_grad(set_to_none=True)
@@ -173,6 +160,12 @@ class LRPComputer:
             self.model.config.use_cache = orig_use_cache
 
         self.relevance_scores = {n: (r / n_samples) for n, r in relevance_acc.items()}
+        
+        # Handle tied embeddings: copy embed_tokens score to lm_head if missing
+        if getattr(self.model.config, "tie_word_embeddings", False):
+            if "model.embed_tokens.weight" in self.relevance_scores and "lm_head.weight" not in self.relevance_scores:
+                self.relevance_scores["lm_head.weight"] = self.relevance_scores["model.embed_tokens.weight"]
+                
         return self.relevance_scores
 
     def save_relevance_scores(self, output_format: str = "safetensors") -> None:
@@ -253,9 +246,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompts", nargs="+", help="Sample prompts for LRP computation"
     )
-    parser.add_argument(
-        "--load-in-4bit", action="store_true", help="Load the model in 4-bit (NF4) for lower memory usage"
-    )
 
     args = parser.parse_args()
 
@@ -264,5 +254,4 @@ if __name__ == "__main__":
         output_path=args.output_path,
         sample_prompts=args.prompts,
         device=args.device,
-        load_in_4bit=args.load_in_4bit,
     )
