@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 import shutil
 import subprocess
 import argparse
@@ -58,13 +59,13 @@ def compute_lrp_scores(args):
         
     print("Computing LRP scores for Model 1...")
     subprocess.run([
-        "python", "lrp_computer.py", args.model1, m1_out,
+        sys.executable, "lrp_computer.py", args.model1, m1_out,
         "--prompts", "The capital of France is"
     ], check=True)
     
     print("Computing LRP scores for Model 2...")
     subprocess.run([
-        "python", "lrp_computer.py", args.model2, m2_out,
+        sys.executable, "lrp_computer.py", args.model2, m2_out,
         "--prompts", "The capital of France is"
     ], check=True)
 

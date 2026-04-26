@@ -22,7 +22,15 @@ class LRPConfig:
     output_path: str
     sample_prompts: List[str]
     max_length: int = 512
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    device: str = None  # Will be normalized in __post_init__
+    
+    def __post_init__(self):
+        """Normalize device to ensure CUDA availability."""
+        if self.device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        elif self.device == "cuda" and not torch.cuda.is_available():
+            print(f"⚠️  CUDA requested but not available. Falling back to CPU.")
+            self.device = "cpu"
 
 
 class LRPComputer:
@@ -86,19 +94,21 @@ class LRPComputer:
 
         try:
             model_type = getattr(self.model.config, "model_type", "").lower()
-            if "llama" in model_type:
+            # Use exact matching to avoid false positives (e.g., qwen3, qwen2_moe)
+            if model_type == "llama":
                 from lxt.models.llama import attnlrp
                 attnlrp.register(self.model)
-            elif "qwen" in model_type:
+            elif model_type == "qwen" or model_type.startswith("qwen2"):
+                # Qwen2 and Qwen2.5 use the same architecture
                 from lxt.models.qwen2 import attnlrp
                 attnlrp.register(self.model)
-            elif "mistral" in model_type:
+            elif model_type == "mistral":
                 from lxt.models.mistral import attnlrp
                 attnlrp.register(self.model)
             else:
                 raise ValueError(
                     f"AttnLRP not supported for model_type={model_type!r}. "
-                    f"Currently supported: llama, qwen, mistral. "
+                    f"Currently supported: llama, qwen, qwen2, qwen2.5, mistral. "
                     f"For other architectures, contribute an lxt rules module."
                 )
         except ImportError:
