@@ -96,12 +96,20 @@ class LRPComputer:
         print("Computing LRP scores using AttnLRP (via lxt)...")
         
         try:
-            from lxt.models.llama import attnlrp
-            # Try to handle architecture-specific registration if needed. 
-            # For this example, we assume Llama architecture.
-            attnlrp.register(self.model)
+            model_type = getattr(self.model.config, "model_type", "").lower()
+            if "llama" in model_type:
+                from lxt.models.llama import attnlrp
+                attnlrp.register(self.model)
+            elif "qwen" in model_type:
+                from lxt.models.qwen2 import attnlrp
+                attnlrp.register(self.model)
+            elif "mistral" in model_type:
+                from lxt.models.mistral import attnlrp
+                attnlrp.register(self.model)
+            else:
+                print(f"Warning: Architecture '{model_type}' not natively supported by lxt's AttnLRP. Relevance may be plain gradient×weight.")
         except ImportError:
-            print("Warning: lxt not found. AttnLRP rules will not be applied.")
+            print("Warning: lxt not found or import failed. AttnLRP rules will not be applied.")
 
         # Free intermediate activations during backward — recompute instead of store
         self.model.gradient_checkpointing_enable()

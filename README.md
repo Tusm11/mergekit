@@ -161,9 +161,11 @@ models:
   - model: your-finetuned-model-1
     parameters:
       weight: 1.0
+      lrp_scores: "./path/to/scores-1.safetensors"
   - model: your-finetuned-model-2
     parameters:
       weight: 1.0
+      lrp_scores: "./path/to/scores-2.safetensors"
 dtype: float16
 ```
 
@@ -263,6 +265,7 @@ models:
   - model: ./models/tinyllama-domain-expert
     parameters:
       weight: 1.0
+      lrp_scores: "./models/tinyllama-domain-expert/lrp_scores.safetensors"
 dtype: float16
 ```
 

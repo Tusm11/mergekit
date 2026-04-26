@@ -46,16 +46,17 @@ base_model:
 
 parameters:
   density: 0.7
-  use_lrp: true
 
 models:
   - model: \"{MODEL_1}\"
     parameters:
       weight: 1.0
+      lrp_scores: "./models/tinyllama-global-full/lrp_scores.safetensors"
 
   - model: \"{MODEL_2}\"
     parameters:
       weight: 1.0
+      lrp_scores: "./models/tinyllama-local-full/lrp_scores.safetensors"
 """
 
     with open("lrp_config.yaml", "w") as f:
