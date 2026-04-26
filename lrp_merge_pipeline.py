@@ -7,12 +7,23 @@ import subprocess
 import argparse
 
 def validate(args):
+    """Validate that all required model paths exist. Fail fast with clear error."""
     print("Step 1: Checking local model paths...")
+    missing_paths = []
+    
     for path in [args.model1, args.model2]:
         if os.path.exists(path):
-            print(f"Found: {path}")
+            print(f"✓ Found: {path}")
         else:
-            print(f" Warning: Missing model: {path}")
+            print(f"✗ Missing: {path}")
+            missing_paths.append(path)
+    
+    if missing_paths:
+        raise FileNotFoundError(
+            f"Required model paths not found:\n" +
+            "\n".join(f"  - {p}" for p in missing_paths) +
+            "\n\nPlease ensure models exist or provide correct paths via --model1 and --model2"
+        )
 
 def generate_yaml(args):
     print("Step 2: Generating YAML...")
@@ -47,10 +58,21 @@ models:
     print(yaml)
 
 def compute_lrp_scores(args):
+    """Compute LRP scores for both models using the correct script path."""
     print("\nStep 2.5: Computing LRP scores (if requested)...\n")
     if not args.compute_lrp:
         print("Skipping LRP computation. Make sure you already have lrp_scores.safetensors in your model directories.")
         return
+    
+    # Resolve lrp_computer.py relative to this script's directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    lrp_computer_path = os.path.join(script_dir, "lrp_computer.py")
+    
+    if not os.path.exists(lrp_computer_path):
+        raise FileNotFoundError(
+            f"lrp_computer.py not found at {lrp_computer_path}\n"
+            f"Expected it next to {__file__}"
+        )
         
     m1_out = os.path.join(args.output, "lrp_scores", "model1")
     m2_out = os.path.join(args.output, "lrp_scores", "model2")
@@ -59,13 +81,13 @@ def compute_lrp_scores(args):
         
     print("Computing LRP scores for Model 1...")
     subprocess.run([
-        sys.executable, "lrp_computer.py", args.model1, m1_out,
+        sys.executable, lrp_computer_path, args.model1, m1_out,
         "--prompts", "The capital of France is"
     ], check=True)
     
     print("Computing LRP scores for Model 2...")
     subprocess.run([
-        sys.executable, "lrp_computer.py", args.model2, m2_out,
+        sys.executable, lrp_computer_path, args.model2, m2_out,
         "--prompts", "The capital of France is"
     ], check=True)
 
