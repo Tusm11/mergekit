@@ -126,11 +126,16 @@ class LRPMergeTask(Task[torch.Tensor]):
                 if importance is not None:
                     importance = importance.to(delta.device)
 
-            # Strict LRP: No silent fallback to magnitude
+            # Strict LRP for tensors that have scores. Tensors without scores
+            # are treated as base-passthrough: do not contribute a delta. This
+            # supports use cases where LRP is computed on a subset of the model
+            # (e.g. the language_model branch of a multimodal LM) and the
+            # remaining tensors (vision tower, MTP heads) should retain base
+            # weights rather than being merged with arbitrary magnitudes.
             if importance is None:
-                raise RuntimeError(
-                    f"LRP scores for tensor '{self.weight_info.name}' not found or not provided for {ref_str}."
-                )
+                # Skip this source's delta for this tensor — equivalent to
+                # weighting it 0 against base. The accumulator stays untouched.
+                continue
 
             # Validate importance shape
             if importance.shape != delta.shape:

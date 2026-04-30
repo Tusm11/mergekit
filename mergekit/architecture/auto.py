@@ -159,10 +159,26 @@ def infer_architecture_info(
 
     def _wi(template: str, prefix: str) -> WeightInfo:
         full_name = prefix + template
-        optional = (full_name.replace("${layer_index}", "0") not in in_all_models) or (
-            tied_keys is not None
-            and any(re.search(pat, full_name) for pat in tied_keys)
-        )
+        # Layer-aware optional: a template is non-optional only when present
+        # in EVERY layer index across every model. Hybrid architectures (e.g.
+        # Qwen3.5 alternating full-attn / linear-attn) have templates that
+        # only appear in some layers — those must be marked optional or
+        # the merge planner errors when fetching from layers that lack them.
+        if "${layer_index}" in template:
+            num_layers = module_layer_counts.get(prefix, 0)
+            present_in_every_layer = num_layers > 0 and all(
+                full_name.replace("${layer_index}", str(i)) in in_all_models
+                for i in range(num_layers)
+            )
+            optional = (not present_in_every_layer) or (
+                tied_keys is not None
+                and any(re.search(pat, full_name) for pat in tied_keys)
+            )
+        else:
+            optional = (full_name not in in_all_models) or (
+                tied_keys is not None
+                and any(re.search(pat, full_name) for pat in tied_keys)
+            )
         is_embed = (full_name in embed_names) or any(
             re.search(pat, full_name) for pat in tied_keys
         )  # strictly speaking you can have tied non-embedding/lm-head weights
