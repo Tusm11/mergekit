@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from transformers import PretrainedConfig
+import torch  # needed for ConfiguredModuleArchitecture.model_rebuild()
 
 from mergekit.common import get_config_value
 
@@ -151,3 +152,12 @@ class ConfiguredModelArchitecture(BaseModel, frozen=True, arbitrary_types_allowe
             config=self.config,
             weight_prefix=self.info.modules[module_name].weight_prefix,
         )
+
+
+# Resolve forward references / nested generics now that all dependent
+# classes (and torch) are imported. Without this, instantiating
+# ConfiguredModuleArchitecture raises PydanticUserError on certain
+# multimodal configs (e.g. Qwen3.5 with model.visual.blocks + mtp.layers
+# inferred as separate modules).
+ConfiguredModuleArchitecture.model_rebuild()
+ConfiguredModelArchitecture.model_rebuild()

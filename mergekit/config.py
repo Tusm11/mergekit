@@ -19,7 +19,7 @@ class ConditionalParameter(BaseModel):
 
 
 ParameterSetting: TypeAlias = Union[
-    ConditionalParameter, List[ConditionalParameter], ScalarOrGradient
+    ConditionalParameter, List[ConditionalParameter], ScalarOrGradient, str
 ]
 
 

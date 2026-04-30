@@ -57,6 +57,12 @@ class LRPComputer:
         print(f"  Using device: {self.config.device}")
         print(f"  Using dtype: {torch_dtype} (required for accurate LRP gradient computation)")
 
+        # Some archs (e.g. Qwen3_5ForConditionalGeneration — multimodal w/ a
+        # generation head) are not in MODEL_FOR_CAUSAL_LM_MAPPING. Fall back to
+        # explicit class lookup by `architectures[0]` after AutoModel and
+        # trust_remote_code paths both fail. Forward with text-only input still
+        # gives LM-head logits — vision tower stays unused.
+        from transformers import AutoConfig
         try:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_path,
@@ -65,15 +71,29 @@ class LRPComputer:
                 low_cpu_mem_usage=True,
             )
         except Exception as e:
-            print(f"  Failed with default settings: {e}")
-            print("  Trying with trust_remote_code=True...")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config.model_path,
-                torch_dtype=torch_dtype,
-                device_map=device_map,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True,
-            )
+            print(f"  AutoModelForCausalLM default failed: {e}")
+            try:
+                print("  Trying with trust_remote_code=True...")
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.config.model_path,
+                    torch_dtype=torch_dtype,
+                    device_map=device_map,
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True,
+                )
+            except Exception as e2:
+                print(f"  trust_remote_code path failed: {e2}")
+                cfg = AutoConfig.from_pretrained(self.config.model_path)
+                arch = cfg.architectures[0] if cfg.architectures else ""
+                print(f"  Falling back to explicit class: {arch}")
+                import importlib
+                cls = getattr(importlib.import_module("transformers"), arch)
+                self.model = cls.from_pretrained(
+                    self.config.model_path,
+                    torch_dtype=torch_dtype,
+                    device_map=device_map,
+                    low_cpu_mem_usage=True,
+                )
 
         # Explicitly move to CPU if needed
         if self.config.device == "cpu":
@@ -90,25 +110,56 @@ class LRPComputer:
 
         try:
             model_type = getattr(self.model.config, "model_type", "").lower()
-            # Use exact matching to avoid false positives (e.g., qwen3, qwen2_moe)
+            # NOTE: PR #682 was written against an older lxt that exposed
+            # `lxt.models.<arch>.attnlrp.register(model)`. Current published lxt
+            # (rachtibat/LRP-eXplains-Transformers) only exposes
+            # `lxt.efficient.monkey_patch(modeling_module, attnLRP_dict)` —
+            # the first positional arg is the transformers modeling MODULE,
+            # the second is the per-arch patch dict. The dict alone won't
+            # work; the module is needed because patch_attention installs
+            # the wrapped attention onto module-level globals.
+            from lxt.efficient import monkey_patch
             if model_type == "llama":
-                from lxt.models.llama import attnlrp
-                attnlrp.register(self.model)
+                from transformers.models.llama import modeling_llama
+                from lxt.efficient.models.llama import attnLRP
+                monkey_patch(modeling_llama, attnLRP)
             elif model_type == "qwen" or model_type.startswith("qwen2"):
-                # Qwen2 and Qwen2.5 use the same architecture
-                from lxt.models.qwen2 import attnlrp
-                attnlrp.register(self.model)
+                # Qwen2 / Qwen2.5 share the same modeling module
+                from transformers.models.qwen2 import modeling_qwen2
+                from lxt.efficient.models.qwen2 import attnLRP
+                monkey_patch(modeling_qwen2, attnLRP)
+            elif model_type == "qwen3":
+                from transformers.models.qwen3 import modeling_qwen3
+                from lxt.efficient.models.qwen3 import attnLRP
+                monkey_patch(modeling_qwen3, attnLRP)
+            elif model_type == "qwen3_5" or model_type == "qwen3_5_text":
+                # `qwen3_5_text` is the inner text branch when the multimodal
+                # Qwen3_5ForConditionalGeneration is loaded via explicit class —
+                # same modeling_qwen3_5.py, so the same attnLRP rules apply.
+                from transformers.models.qwen3_5 import modeling_qwen3_5
+                from lxt.efficient.models.qwen3_5 import attnLRP
+                monkey_patch(modeling_qwen3_5, attnLRP)
             elif model_type == "mistral":
-                from lxt.models.mistral import attnlrp
-                attnlrp.register(self.model)
+                from transformers.models.mistral import modeling_mistral
+                from lxt.efficient.models.mistral import attnLRP
+                monkey_patch(modeling_mistral, attnLRP)
+            elif model_type == "gemma3":
+                from transformers.models.gemma3 import modeling_gemma3
+                from lxt.efficient.models.gemma3 import attnLRP
+                monkey_patch(modeling_gemma3, attnLRP)
             else:
                 raise ValueError(
                     f"AttnLRP not supported for model_type={model_type!r}. "
-                    f"Currently supported: llama, qwen, qwen2, qwen2.5, mistral. "
-                    f"For other architectures, contribute an lxt rules module."
+                    f"Currently supported: llama, qwen, qwen2, qwen2.5, qwen3, qwen3_5, mistral, gemma3. "
+                    f"For other architectures, contribute an lxt rules module under "
+                    f"lxt/efficient/models/."
                 )
-        except ImportError:
-            raise ImportError("lxt is required for AttnLRP. Install with: pip install lxt") from None
+        except ImportError as e:
+            raise ImportError(
+                f"lxt is required for AttnLRP. Install with: "
+                f"pip install git+https://github.com/rachtibat/LRP-eXplains-Transformers.git "
+                f"(underlying error: {e})"
+            ) from None
 
         # Free intermediate activations during backward — recompute instead of store
         self.model.gradient_checkpointing_enable()
@@ -178,6 +229,18 @@ class LRPComputer:
         """Save computed relevance scores to disk."""
         output_path = Path(self.config.output_path)
         output_path.mkdir(parents=True, exist_ok=True)
+
+        # Tied embeddings: lm_head.weight and model.embed_tokens.weight share
+        # storage on architectures with `tie_word_embeddings=True`. safetensors
+        # refuses to serialise shared storage. Clone the duplicate so each
+        # tensor has its own buffer (memory cost is one extra weight tile).
+        seen = {}
+        for n, t in list(self.relevance_scores.items()):
+            ptr = t.data_ptr()
+            if ptr in seen:
+                self.relevance_scores[n] = t.clone()
+            else:
+                seen[ptr] = n
 
         if output_format == "safetensors":
             try:
